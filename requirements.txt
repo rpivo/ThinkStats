@@ -1,3 +1,4 @@
+empiricaldist
 html5lib
 lxml
 jupyter
