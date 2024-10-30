@@ -7,12 +7,14 @@ License: GNU GPLv3 http://www.gnu.org/licenses/gpl.html
 """
 
 import bisect
+import contextlib
+import re
 from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
 import scipy
 
-from empiricaldist import Pmf, Cdf
+from empiricaldist import Hist, Pmf, Cdf, Hazard
 
 from scipy.stats import norm
 from scipy.stats import gaussian_kde
@@ -21,12 +23,101 @@ from scipy.integrate import simpson
 from IPython.display import display
 from statsmodels.iolib.table import SimpleTable
 
+# The following are magic commands from thinkpython.py
+
+from IPython.core.magic import register_cell_magic
+from IPython.core.magic_arguments import argument, magic_arguments, parse_argstring
+
+
+def extract_function_name(text):
+    """Find a function definition and return its name.
+
+    text: String
+
+    returns: String or None
+    """
+    pattern = r"def\s+(\w+)\s*\("
+    match = re.search(pattern, text)
+    if match:
+        func_name = match.group(1)
+        return func_name
+    else:
+        return None
+
+
+@register_cell_magic
+def add_method_to(args, cell):
+
+    # get the name of the function defined in this cell
+    func_name = extract_function_name(cell)
+    if func_name is None:
+        return f"This cell doesn't define any new functions."
+
+    # get the class we're adding it to
+    namespace = get_ipython().user_ns
+    class_name = args
+    cls = namespace.get(class_name, None)
+    if cls is None:
+        return f"Class '{class_name}' not found."
+
+    # save the old version of the function if it was already defined
+    old_func = namespace.get(func_name, None)
+    if old_func is not None:
+        del namespace[func_name]
+
+    # Execute the cell to define the function
+    get_ipython().run_cell(cell)
+
+    # get the newly defined function
+    new_func = namespace.get(func_name, None)
+    if new_func is None:
+        return f"This cell didn't define {func_name}."
+
+    # add the function to the class and remove it from the namespace
+    setattr(cls, func_name, new_func)
+    del namespace[func_name]
+
+    # restore the old function to the namespace
+    if old_func is not None:
+        namespace[func_name] = old_func
+
+    
+@register_cell_magic
+def expect_error(line, cell):
+    try:
+        get_ipython().run_cell(cell)
+    except Exception as e:
+        get_ipython().run_cell('%tb')
+
+
+
+@magic_arguments()
+@argument('exception', help='Type of exception to catch')
+@register_cell_magic
+def expect(line, cell):
+    args = parse_argstring(expect, line)
+    exception = eval(args.exception)
+    try:
+        get_ipython().run_cell(cell)
+    except exception as e:
+        get_ipython().run_cell("%tb")
+        
 
 # Make the figures smaller to save some screen real estate.
 # The figures generated for the book have DPI 400, so scaling
 # them by a factor of 4 restores them to the size in the notebooks.
 plt.rcParams['figure.dpi'] = 75
 plt.rcParams['figure.figsize'] = [6, 3.5]
+
+def remove_spines():
+    """Remove the spines of a plot but keep the ticks visible."""
+    ax = plt.gca()
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    
+    # Ensure ticks stay visible
+    ax.xaxis.set_ticks_position('bottom')
+    ax.yaxis.set_ticks_position('left')
 
 
 def value_counts(series, **options):
@@ -524,6 +615,31 @@ def display_summary(result):
     display(table)
 
 
+
+## Chapter 13
+
+def estimate_hazard(complete, ongoing):
+    """Estimates the hazard function.
+
+    complete: sequence of complete lifetimes
+    ongoing: sequence of ongoing lifetimes
+
+    returns: Hazard object
+    """
+    hist_complete = Hist.from_seq(complete)
+    hist_ongoing = Hist.from_seq(ongoing)
+
+    surv_complete = hist_complete.make_surv()
+    surv_ongoing = hist_ongoing.make_surv()
+
+    ts = pd.Index.union(hist_complete.index, hist_ongoing.index)
+
+    at_risk = hist_complete(ts) + hist_ongoing(ts) + surv_complete(ts) + surv_ongoing(ts)
+
+    hs = hist_complete(ts) / at_risk
+
+    return Hazard(hs, ts)
+
 ## unassigned
 
 
@@ -893,8 +1009,6 @@ def resample_rows_weighted(df, column="finalwgt"):
     return df.sample(n, weights=weights, replace=True)
 
 
-
-
 def summarize_results(results):
     """Prints the most important parts of linear regression results:
 
@@ -926,7 +1040,7 @@ def print_tabular(rows, header):
     print("\\hline")
 
 
-class Normal():
+class Normal:
     """Represents a Normal distribution"""
 
     def __init__(self, mu, sigma2, label=""):
@@ -967,6 +1081,16 @@ class Normal():
 
     __radd__ = __add__
 
+    def sample(self, n):
+        """Generates a random sample from this distribution.
+
+        n: int, length of the sample
+
+        returns: NumPy array
+        """
+        sigma = np.sqrt(self.sigma2)
+        return np.random.normal(self.mu, sigma, n)
+
     def __sub__(self, other):
         """Subtracts a number or other Normal.
 
@@ -999,12 +1123,12 @@ class Normal():
 
         returns: new Normal
         """
-        return 1.0 / divisor * self
+        return 1 / divisor * self
 
     __truediv__ = __div__
 
     def sum(self, n):
-        """Returns the distribution of the sum of n values.
+        """Return the distribution of the sum of n values.
 
         n: int
 
@@ -1012,16 +1136,16 @@ class Normal():
         """
         return Normal(n * self.mu, n * self.sigma2)
 
-    def plot(self, n_sigmas=4, **options):
-        """Returns pair of xs, ys suitable for plotting.
+    def plot_cdf(self, n_sigmas=4, **options):
+        """Plot the CDF of this distribution.
 
         n_sigmas: how many sigmas to show
-        options: passed along to plot
+        options: passed along to plt.plot
         """
-        underride(options, label=self.label)
-        mu, sigma = self.mu, self.sigma
+        mu, sigma = self.mu, np.sqrt(self.sigma2)
         low, high = mu - n_sigmas * sigma, mu + 3 * sigma
-        xs, ys = render_normal_cdf(mu, sigma, low, high)
+        xs = np.linspace(low, high, 101)
+        ys = scipy.stats.norm.cdf(xs, mu, sigma)
         plt.plot(xs, ys, **options)
 
     def prob(self, x):
