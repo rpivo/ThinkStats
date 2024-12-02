@@ -741,7 +741,7 @@ def add_rho(rho):
     """Adds a label to a figure to indicate the correlation."""
     ax = plt.gca()
     plt.text(0.5, 0.05, f"ρ = {rho}",
-        fontsize="large",
+        fontsize="x-large",
         transform=ax.transAxes,
         ha="center",
         va="center",
